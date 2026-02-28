@@ -1,0 +1,108 @@
+# -*- coding: utf-8 -*-
+"""
+FY-4B超分辨率训练配置文件
+基于PFT-SR方法
+"""
+
+# 实验名称
+experiment_name: "FY4B_PFTSR_2km_to_1km"
+
+# 数据配置
+data:
+  # 数据路径 (暂时使用占位符)
+  low_res_file: "lowResfile1"  # 低分辨率数据文件 (如4km分辨率)
+  high_res_file: "highResfile2"  # 高分辨率数据文件 (如2km分辨率)
+  
+  # 实际数据路径 (当准备好实际数据时使用)
+  # low_res_dir: "/root/autodl-tmp/4000M"    # 低分辨率数据目录
+  # high_res_dir: "/root/autodl-tmp/2000M"   # 高分辨率数据目录
+  
+  # 通道配置
+  channels:  # 使用的中红外通道
+    - "NOMChannel05"  # 3.5um
+    - "NOMChannel06"  # 4.05um
+    - "NOMChannel07"  # 6.95um
+    - "NOMChannel08"  # 8.55um
+    - "NOMChannel09"  # 10.8um
+    - "NOMChannel10"  # 12.0um
+    - "NOMChannel11"  # 13.5um
+    - "NOMChannel12"  # 14.5um
+  
+  # 数据预处理
+  patch_size: 64        # 裁剪的图像块大小 (低分辨率空间)
+  upscale_factor: 2     # 上采样因子 (2: 4km->2km 或 2km->1km)
+  
+  # 数据加载
+  batch_size: 16
+  num_workers: 4
+  pin_memory: true
+
+# 模型配置
+model:
+  name: "PFTSR"
+  in_channels: 8        # 输入通道数 (中红外通道数)
+  out_channels: 8       # 输出通道数
+  num_features: 64      # 特征维度
+  num_pft_blocks: 3     # PFT块数量
+  num_rb_per_block: 3   # 每个PFT块中的残差块数量
+  use_attention: true   # 是否使用注意力机制
+
+# 损失函数配置
+loss:
+  lambda_l1: 1.0        # L1损失权重
+  lambda_ssim: 0.5      # SSIM损失权重
+  lambda_freq: 0.1      # 频域损失权重
+  lambda_grad: 0.1      # 梯度损失权重
+
+# 优化器配置
+optimizer:
+  name: "Adam"
+  lr: 0.0001            # 初始学习率
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+
+# 学习率调度器
+scheduler:
+  name: "MultiStepLR"
+  milestones: [100, 200, 300]
+  gamma: 0.5
+
+# 训练配置
+training:
+  num_epochs: 500
+  warmup_epochs: 10
+  
+  # 梯度裁剪
+  grad_clip: 1.0
+  
+  # 验证频率
+  val_interval: 10      # 每10个epoch验证一次
+  
+  # 可视化频率
+  viz_interval: 50      # 每50个epoch可视化一次
+  
+  # 检查点保存
+  save_interval: 50     # 每50个epoch保存一次
+  keep_last_n: 5        # 保留最近N个检查点
+
+# 评估配置
+evaluation:
+  metrics:
+    - "psnr"
+    - "ssim"
+    - "rmse"
+  save_predictions: true
+
+# 输出配置
+output:
+  checkpoint_dir: "./checkpoints"
+  log_dir: "./logs"
+  viz_dir: "./visualizations"
+  
+# 设备配置
+device:
+  use_cuda: true
+  gpu_ids: [0]          # 使用的GPU ID列表
+  
+# 随机种子 (用于结果复现)
+seed: 42

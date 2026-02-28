@@ -1,0 +1,25 @@
+# FY-4B超分辨率项目依赖
+
+# 深度学习框架
+torch>=1.12.0
+torchvision>=0.13.0
+
+# 科学计算
+numpy>=1.21.0
+scipy>=1.7.0
+
+# 数据处理和可视化
+h5py>=3.6.0          # HDF文件读取
+matplotlib>=3.5.0    # 绘图和可视化
+pillow>=9.0.0        # 图像处理
+
+# 配置和日志
+pyyaml>=6.0          # YAML配置文件解析
+tensorboard>=2.9.0   # TensorBoard可视化
+
+# 其他
+tqdm>=4.64.0         # 进度条
+
+# 可选依赖 (用于HDF文件处理)
+# pyhdf>=0.10.0      # NASA HDF文件读取
+# netCDF4>=1.6.0     # NetCDF文件读取
