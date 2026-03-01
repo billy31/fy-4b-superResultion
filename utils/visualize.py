@@ -147,10 +147,17 @@ def plot_training_curves(history, save_path):
     
     epochs = range(1, len(history['loss']) + 1)
     
+    # 获取验证发生的epoch（如果有记录）
+    if 'val_epochs' in history and len(history['val_epochs']) > 0:
+        val_epochs = history['val_epochs']
+    else:
+        # 兼容旧版本，假设验证每个epoch都进行
+        val_epochs = list(epochs)
+    
     # Loss曲线
     axes[0].plot(epochs, history['loss'], 'b-', label='Train Loss')
-    if 'val_loss' in history:
-        axes[0].plot(epochs, history['val_loss'], 'r-', label='Val Loss')
+    if 'val_loss' in history and len(history['val_loss']) > 0:
+        axes[0].plot(val_epochs[:len(history['val_loss'])], history['val_loss'], 'r-', label='Val Loss')
     axes[0].set_xlabel('Epoch')
     axes[0].set_ylabel('Loss')
     axes[0].set_title('Training Loss')
@@ -158,8 +165,8 @@ def plot_training_curves(history, save_path):
     axes[0].grid(True)
     
     # PSNR曲线
-    if 'val_psnr' in history:
-        axes[1].plot(epochs, history['val_psnr'], 'g-', label='PSNR')
+    if 'val_psnr' in history and len(history['val_psnr']) > 0:
+        axes[1].plot(val_epochs[:len(history['val_psnr'])], history['val_psnr'], 'g-', label='PSNR')
         axes[1].set_xlabel('Epoch')
         axes[1].set_ylabel('PSNR (dB)')
         axes[1].set_title('Validation PSNR')
@@ -167,8 +174,8 @@ def plot_training_curves(history, save_path):
         axes[1].grid(True)
     
     # SSIM曲线
-    if 'val_ssim' in history:
-        axes[2].plot(epochs, history['val_ssim'], 'm-', label='SSIM')
+    if 'val_ssim' in history and len(history['val_ssim']) > 0:
+        axes[2].plot(val_epochs[:len(history['val_ssim'])], history['val_ssim'], 'm-', label='SSIM')
         axes[2].set_xlabel('Epoch')
         axes[2].set_ylabel('SSIM')
         axes[2].set_title('Validation SSIM')

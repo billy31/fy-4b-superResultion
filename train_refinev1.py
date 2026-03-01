@@ -517,7 +517,8 @@ def main():
         'loss': [],
         'val_loss': [],
         'val_psnr': [],
-        'val_ssim': []
+        'val_ssim': [],
+        'val_epochs': []  # 记录验证发生的epoch
     }
     
     if args.resume:
@@ -585,6 +586,7 @@ def main():
             history['val_loss'].append(val_loss)
             history['val_psnr'].append(metrics['psnr'])
             history['val_ssim'].append(metrics['ssim'])
+            history['val_epochs'].append(epoch + 1)  # 记录验证发生的epoch
             
             print(f"  Val Loss: {val_loss:.6f}")
             print(f"  Val PSNR: {metrics['psnr']:.2f} dB")
