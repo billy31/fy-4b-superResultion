@@ -67,3 +67,5 @@ Thumbs.db
 
 # Environment
 .env
+preprocessing/output/
+*.npy
