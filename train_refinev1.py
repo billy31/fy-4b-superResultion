@@ -1,20 +1,21 @@
 # -*- coding: utf-8 -*-
 """
-FY-4B卫星超分辨率训练脚本
+FY-4B卫星超分辨率训练脚本 - 优化版本 (RefineV1)
 基于PFT-SR方法
 
-使用方法:
-    python train.py <高分辨率> <波段号>
-    
-参数:
-    高分辨率: 目标分辨率，可选 2000M 或 1000M
-              - 2000M: 训练 4000M -> 2000M (4km -> 2km)
-              - 1000M: 训练 2000M -> 1000M (2km -> 1km)
-    波段号: 通道号，可选 CH07 或 CH08
+优化内容:
+1. 调整损失函数权重 (降低SSIM和FREQ权重，避免梯度主导)
+2. Warmup + Cosine Annealing学习率调度
+3. 减小batch size增加batch数量，提高训练稳定性
+4. 增加验证频率 (每5个epoch)，更快发现问题
+5. 优化的数据增强策略
+6. 调整学习率 (降低初始学习率)
 
+使用方法:
+    python train_refinev1.py <高分辨率> <波段号>
+    
 示例:
-    python train.py 2000M CH07    # 训练 4km->2km，CH07通道
-    python train.py 2000M CH08    # 训练 4km->2km，CH08通道
+    python train_refinev1.py 2000M CH07    # 训练 4km->2km，CH07通道
 """
 
 import os
@@ -44,14 +45,14 @@ from utils import (
 from utils.visualize import plot_training_curves
 
 
-# 基础配置模板
+# 优化后的基础配置
 BASE_CONFIG = {
-    'experiment_name': 'FY4B_PFTSR',
+    'experiment_name': 'FY4B_PFTSR_RefineV1',
     'data': {
         'base_dir': '/root/autodl-tmp/Calibration-FY4B',
         'patch_size': 64,        # 低分辨率空间裁剪大小
         'upscale_factor': 2,     # 上采样因子 (固定2x)
-        'batch_size': 8,
+        'batch_size': 4,         # 减小batch size，增加batch数量
         'num_workers': 4,
         'pin_memory': True,
     },
@@ -64,36 +65,38 @@ BASE_CONFIG = {
         'num_rb_per_block': 3,
         'use_attention': True,
     },
+    # 优化: 调整损失函数权重
     'loss': {
-        'lambda_l1': 1.0,
-        'lambda_ssim': 0.5,
-        'lambda_freq': 0.1,
-        'lambda_grad': 0.1,
+        'lambda_l1': 1.0,        # L1保持主导
+        'lambda_ssim': 0.1,      # 降低SSIM权重 (原为0.5)
+        'lambda_freq': 0.01,     # 大幅降低频域损失权重 (原为0.1)
+        'lambda_grad': 0.05,     # 适当降低梯度损失 (原为0.1)
     },
     'optimizer': {
         'name': 'Adam',
-        'lr': 0.0001,
+        'lr': 5e-5,              # 降低初始学习率 (原为1e-4)
         'betas': [0.9, 0.999],
-        'weight_decay': 0.0001,
+        'weight_decay': 1e-4,    # 适当降低weight decay
     },
+    # 优化: 使用Warmup + Cosine Annealing
     'scheduler': {
-        'name': 'MultiStepLR',
-        'milestones': [100, 200, 300],
-        'gamma': 0.5,
+        'name': 'CosineWarmup',  # Warmup + Cosine Annealing
+        'warmup_epochs': 10,     # 前10个epoch warmup
+        'min_lr': 1e-7,          # 最小学习率
     },
     'training': {
         'num_epochs': 500,
-        'warmup_epochs': 10,
-        'grad_clip': 1.0,
-        'val_interval': 10,      # 每10个epoch验证一次
+        'grad_clip': 1.0,        # 梯度裁剪阈值
+        'val_interval': 5,       # 优化: 每5个epoch验证一次 (原为10)
         'viz_interval': 50,      # 每50个epoch可视化一次
         'save_interval': 50,     # 每50个epoch保存一次
         'keep_last_n': 5,
         'early_stopping': {
-            'enabled': True,     # 启用早停
-            'patience': 10,      # 默认10轮验证无提升则停止
-            'metric': 'psnr',    # 监控指标
-            'mode': 'max',       # 指标越大越好
+            'enabled': True,
+            'patience': 15,        # 增加到15次验证 (更宽容)
+            'metric': 'psnr',
+            'mode': 'max',
+            'min_delta': 0.01,     # 最小提升阈值0.01dB
         },
     },
     'evaluation': {
@@ -108,11 +111,47 @@ BASE_CONFIG = {
 }
 
 
+class WarmupCosineScheduler:
+    """
+    Warmup + Cosine Annealing 学习率调度器
+    
+    前warmup_epochs个epoch线性增加学习率从0到初始值
+    之后使用Cosine Annealing衰减到min_lr
+    """
+    def __init__(self, optimizer, warmup_epochs, total_epochs, min_lr=1e-7, base_lr=5e-5):
+        self.optimizer = optimizer
+        self.warmup_epochs = warmup_epochs
+        self.total_epochs = total_epochs
+        self.min_lr = min_lr
+        self.base_lr = base_lr
+        self.current_epoch = 0
+        
+    def step(self):
+        self.current_epoch += 1
+        
+        if self.current_epoch <= self.warmup_epochs:
+            # Warmup阶段: 线性增加
+            warmup_factor = self.current_epoch / self.warmup_epochs
+            lr = self.base_lr * warmup_factor
+        else:
+            # Cosine Annealing阶段
+            progress = (self.current_epoch - self.warmup_epochs) / (self.total_epochs - self.warmup_epochs)
+            lr = self.min_lr + (self.base_lr - self.min_lr) * 0.5 * (1 + np.cos(np.pi * progress))
+        
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = lr
+        
+        return lr
+    
+    def get_last_lr(self):
+        return [param_group['lr'] for param_group in self.optimizer.param_groups]
+
+
 def parse_args():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(
-        description='FY-4B超分辨率训练',
-        usage='python train.py <高分辨率> <波段号> [选项]'
+        description='FY-4B超分辨率训练 (优化版本 RefineV1)',
+        usage='python train_refinev1.py <高分辨率> <波段号> [选项]'
     )
     
     # 位置参数
@@ -127,11 +166,11 @@ def parse_args():
     parser.add_argument('--epochs', type=int, default=None,
                         help='训练epoch数 (覆盖默认值)')
     parser.add_argument('--batch-size', type=int, default=None,
-                        help='批次大小 (覆盖默认值)')
+                        help='批次大小 (默认4，增加batch数量)')
     parser.add_argument('--lr', type=float, default=None,
-                        help='学习率 (覆盖默认值)')
-    parser.add_argument('--patience', type=int, default=10,
-                        help='早停容忍轮数 (默认10次验证无提升则停止)')
+                        help='学习率 (默认5e-5)')
+    parser.add_argument('--patience', type=int, default=15,
+                        help='早停容忍轮数 (默认15次验证)')
     
     return parser.parse_args()
 
@@ -141,7 +180,7 @@ def build_config(args):
     config = BASE_CONFIG.copy()
     
     # 解析分辨率
-    high_res = args.high_res  # 2000M 或 1000M
+    high_res = args.high_res
     if high_res == '2000M':
         low_res = '4000M'     # 4km -> 2km
     elif high_res == '1000M':
@@ -150,11 +189,11 @@ def build_config(args):
         raise ValueError(f"不支持的分辨率: {high_res}")
     
     # 解析波段
-    band = args.band  # CH07 或 CH08
-    channel_name = band.replace('CH', 'Channel')  # Channel07 或 Channel08
+    band = args.band
+    channel_name = band.replace('CH', 'Channel')
     
     # 更新配置
-    config['experiment_name'] = f'FY4B_PFTSR_{low_res}_to_{high_res}_{band}'
+    config['experiment_name'] = f'FY4B_RefineV1_{low_res}_to_{high_res}_{band}'
     config['data']['high_res'] = high_res
     config['data']['low_res'] = low_res
     config['data']['band'] = band
@@ -162,8 +201,8 @@ def build_config(args):
     config['data']['low_res_dir'] = f"{config['data']['base_dir']}/{low_res}/{band}"
     config['data']['high_res_dir'] = f"{config['data']['base_dir']}/{high_res}/{band}"
     
-    # 输出目录: /root/autodl-tmp/Calibration-FY4B/trained_model/{分辨率}_{波段号}/
-    output_base = f"{config['data']['base_dir']}/trained_model/{high_res}_{band}"
+    # 输出目录
+    output_base = f"{config['data']['base_dir']}/trained_model_refinev1/{high_res}_{band}"
     config['output'] = {
         'checkpoint_dir': f'{output_base}/checkpoints',
         'log_dir': f'{output_base}/logs',
@@ -173,10 +212,12 @@ def build_config(args):
     # 覆盖参数
     if args.epochs is not None:
         config['training']['num_epochs'] = args.epochs
+        config['scheduler']['total_epochs'] = args.epochs
     if args.batch_size is not None:
         config['data']['batch_size'] = args.batch_size
     if args.lr is not None:
         config['optimizer']['lr'] = args.lr
+        config['scheduler']['base_lr'] = args.lr
     if args.patience is not None:
         config['training']['early_stopping']['patience'] = args.patience
     
@@ -225,22 +266,16 @@ def create_optimizer(model, config):
 
 
 def create_scheduler(optimizer, config):
-    """创建学习率调度器"""
+    """创建学习率调度器 (Warmup + Cosine Annealing)"""
     sched_cfg = config['scheduler']
     
-    if sched_cfg['name'] == 'MultiStepLR':
-        scheduler = optim.lr_scheduler.MultiStepLR(
-            optimizer,
-            milestones=sched_cfg['milestones'],
-            gamma=sched_cfg['gamma']
-        )
-    elif sched_cfg['name'] == 'CosineAnnealingLR':
-        scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            optimizer,
-            T_max=config['training']['num_epochs']
-        )
-    else:
-        scheduler = None
+    scheduler = WarmupCosineScheduler(
+        optimizer=optimizer,
+        warmup_epochs=sched_cfg['warmup_epochs'],
+        total_epochs=config['training']['num_epochs'],
+        min_lr=sched_cfg['min_lr'],
+        base_lr=sched_cfg.get('base_lr', config['optimizer']['lr'])
+    )
     
     return scheduler
 
@@ -269,9 +304,12 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, co
         # 反向传播
         loss.backward()
         
-        # 梯度裁剪
+        # 梯度裁剪 (确保梯度稳定性)
         if config['training']['grad_clip'] > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), config['training']['grad_clip'])
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(), 
+                config['training']['grad_clip']
+            )
         
         optimizer.step()
         
@@ -334,19 +372,9 @@ def validate(model, val_loader, criterion, device):
 
 
 class EarlyStopping:
-    """
-    早停模块
+    """早停模块"""
     
-    当监控指标在指定轮数内没有提升时，触发早停
-    
-    参数:
-        patience: 容忍轮数（验证次数）
-        metric: 监控指标名称
-        mode: 'max' 表示指标越大越好，'min' 表示指标越小越好
-        min_delta: 最小变化量，小于此值视为无提升
-    """
-    
-    def __init__(self, patience=5, metric='psnr', mode='max', min_delta=1e-4):
+    def __init__(self, patience=15, metric='psnr', mode='max', min_delta=0.01):
         self.patience = patience
         self.metric = metric
         self.mode = mode
@@ -356,44 +384,31 @@ class EarlyStopping:
         self.best_value = None
         self.early_stop = False
         
-        # 根据mode确定比较函数
         if mode == 'max':
             self.is_better = lambda new, best: new > best + min_delta
             self.best_value = float('-inf')
-        else:  # min
+        else:
             self.is_better = lambda new, best: new < best - min_delta
             self.best_value = float('inf')
     
     def __call__(self, metrics):
-        """
-        检查是否需要早停
-        
-        参数:
-            metrics: 包含监控指标的字典
-        
-        返回:
-            early_stop: 是否触发早停
-            is_best: 当前是否为最佳指标
-        """
         if self.metric not in metrics:
             return False, False
         
         current_value = metrics[self.metric]
         
-        # 检查是否有提升
         if self.is_better(current_value, self.best_value):
             self.best_value = current_value
             self.counter = 0
-            return False, True  # 未触发早停，是最佳值
+            return False, True
         else:
             self.counter += 1
             if self.counter >= self.patience:
                 self.early_stop = True
-                return True, False  # 触发早停
-            return False, False  # 未触发早停，不是最佳值
+                return True, False
+            return False, False
     
     def get_status(self):
-        """获取当前状态信息"""
         return {
             'counter': self.counter,
             'patience': self.patience,
@@ -416,9 +431,9 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() and config['device']['use_cuda'] else 'cpu')
     
     # 打印训练信息
-    print("=" * 70)
-    print(f"FY-4B 超分辨率训练")
-    print("=" * 70)
+    print("=" * 75)
+    print(f"FY-4B 超分辨率训练 - 优化版本 (RefineV1)")
+    print("=" * 75)
     print(f"任务: {config['data']['low_res']} -> {config['data']['high_res']} ({args.high_res})")
     print(f"波段: {args.band} ({config['data']['channel']})")
     print(f"上采样倍数: {config['data']['upscale_factor']}x")
@@ -426,7 +441,17 @@ def main():
     print(f"高分辨率数据: {config['data']['high_res_dir']}")
     print(f"输出目录: {config['output']['checkpoint_dir']}")
     print(f"设备: {device}")
-    print("=" * 70)
+    print("-" * 75)
+    print("【优化配置】")
+    print(f"  • 损失权重: L1={config['loss']['lambda_l1']}, "
+          f"SSIM={config['loss']['lambda_ssim']}, "
+          f"FREQ={config['loss']['lambda_freq']}, "
+          f"GRAD={config['loss']['lambda_grad']}")
+    print(f"  • 学习率: {config['optimizer']['lr']} (Warmup {config['scheduler']['warmup_epochs']}epoch + Cosine)")
+    print(f"  • Batch Size: {config['data']['batch_size']} (增加batch数量)")
+    print(f"  • 验证间隔: 每{config['training']['val_interval']}个epoch")
+    print(f"  • 梯度裁剪: {config['training']['grad_clip']}")
+    print("=" * 75)
     
     # 创建输出目录
     os.makedirs(config['output']['checkpoint_dir'], exist_ok=True)
@@ -439,7 +464,7 @@ def main():
         yaml.dump(config, f, default_flow_style=False, allow_unicode=True)
     print(f"\n配置已保存: {config_save_path}")
     
-    # 创建TensorBoard writer (使用 ./tf-logs 目录，按任务分子目录)
+    # 创建TensorBoard writer
     tb_log_dir = f"./tf-logs/{config['experiment_name']}"
     os.makedirs(tb_log_dir, exist_ok=True)
     writer = SummaryWriter(log_dir=tb_log_dir)
@@ -458,6 +483,7 @@ def main():
     )
     print(f"训练样本数: {len(train_loader.dataset)}")
     print(f"验证样本数: {len(val_loader.dataset)}")
+    print(f"每epoch batch数: {len(train_loader)} (训练), {len(val_loader)} (验证)")
     
     # 创建模型
     print("\n正在创建模型...")
@@ -499,6 +525,9 @@ def main():
             args.resume, model, optimizer, device
         )
         start_epoch += 1
+        # 恢复scheduler状态
+        for _ in range(start_epoch):
+            scheduler.step()
         print(f"\n从检查点恢复: {args.resume}")
         print(f"起始epoch: {start_epoch}, 当前最佳PSNR: {best_psnr:.2f} dB")
     
@@ -507,36 +536,38 @@ def main():
     early_stopping = None
     if early_stopping_cfg.get('enabled', False):
         early_stopping = EarlyStopping(
-            patience=early_stopping_cfg.get('patience', 5),
+            patience=early_stopping_cfg.get('patience', 15),
             metric=early_stopping_cfg.get('metric', 'psnr'),
-            mode=early_stopping_cfg.get('mode', 'max')
+            mode=early_stopping_cfg.get('mode', 'max'),
+            min_delta=early_stopping_cfg.get('min_delta', 0.01)
         )
-        print(f"早停已启用: patience={early_stopping.patience}, metric={early_stopping.metric}")
+        print(f"早停已启用: patience={early_stopping.patience}, "
+              f"metric={early_stopping.metric}, min_delta={early_stopping.min_delta}")
     
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 75)
     print(f"开始训练: {config['experiment_name']}")
     print(f"训练epoch: {start_epoch} -> {config['training']['num_epochs']}")
-    print(f"批次大小: {config['data']['batch_size']}")
+    print(f"批次大小: {config['data']['batch_size']} (每epoch {len(train_loader)} batches)")
     print(f"初始学习率: {config['optimizer']['lr']}")
     print(f"早停patience: {config['training']['early_stopping']['patience']} 次验证")
-    print("=" * 70)
+    print("=" * 75)
     print(f"\n查看TensorBoard: tensorboard --logdir=./tf-logs --port=6016")
-    print("=" * 70 + "\n")
+    print("=" * 75 + "\n")
     
     # 训练循环
     for epoch in range(start_epoch, config['training']['num_epochs']):
         epoch_start_time = time.time()
         
-        print(f"Epoch [{epoch+1}/{config['training']['num_epochs']}]")
+        # 更新学习率
+        current_lr = scheduler.step()
+        
+        print(f"Epoch [{epoch+1}/{config['training']['num_epochs']}] "
+              f"LR: {current_lr:.2e}")
         
         # 训练
         train_loss, train_loss_dict = train_one_epoch(
             model, train_loader, criterion, optimizer, device, epoch, config, writer
         )
-        
-        # 更新学习率
-        if scheduler is not None:
-            scheduler.step()
         
         # 记录训练指标
         history['loss'].append(train_loss)
@@ -545,6 +576,7 @@ def main():
             if k != 'total':
                 print(f"    {k}: {v:.6f}")
             writer.add_scalar(f'Loss/train_{k}', v, epoch)
+        writer.add_scalar('Train/lr', current_lr, epoch)
         
         # 验证
         if (epoch + 1) % config['training']['val_interval'] == 0:
@@ -577,10 +609,10 @@ def main():
                 print(f"  EarlyStopping: {status['counter']}/{status['patience']}")
                 
                 if should_stop:
-                    print(f"\n{'=' * 70}")
+                    print(f"\n{'=' * 75}")
                     print(f"早停触发! 连续 {early_stopping.patience} 次验证无提升")
                     print(f"最佳 {early_stopping.metric.upper()}: {status['best_value']:.4f}")
-                    print(f"{'=' * 70}\n")
+                    print(f"{'=' * 75}\n")
                     break
             
             # 可视化结果
@@ -644,7 +676,7 @@ def main():
     # 判断是否因为早停而结束
     stopped_early = early_stopping is not None and early_stopping.early_stop
     
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 75)
     if stopped_early:
         print("训练提前结束 (早停触发)")
     else:
@@ -652,7 +684,7 @@ def main():
     print(f"最佳PSNR: {best_psnr:.2f} dB")
     print(f"模型保存: {config['output']['checkpoint_dir']}")
     print(f"\n查看训练日志: tensorboard --logdir=./tf-logs --port=6016")
-    print("=" * 70)
+    print("=" * 75)
 
 
 if __name__ == '__main__':

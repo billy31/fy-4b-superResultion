@@ -1,0 +1,98 @@
+# FY-4B超分辨率训练配置文件 - CH08通道
+# 基于PFT-SR方法
+# 任务: 4km -> 2km 超分辨率 (4000M -> 2000M)
+
+# 实验名称
+experiment_name: "FY4B_PFTSR_4km_to_2km_CH08"
+
+# 数据配置
+data:
+  # 数据路径 (定标后的数据)
+  low_res_dir: "/root/autodl-tmp/Calibration-FY4B/4000M/CH08"   # 低分辨率数据目录 (4km)
+  high_res_dir: "/root/autodl-tmp/Calibration-FY4B/2000M/CH08"  # 高分辨率数据目录 (2km)
+  
+  # 占位符文件 (用于测试，当实际路径不存在时使用)
+  # low_res_file: "lowResfile1"
+  # high_res_file: "highResfile2"
+  
+  # 通道配置 (单通道训练)
+  channel: "Channel08"  # 使用 Channel08 (IR7.00, 亮温)
+  
+  # 数据预处理
+  patch_size: 64        # 裁剪的图像块大小 (低分辨率空间，即4km空间)
+  upscale_factor: 2     # 上采样因子 (2: 4km->2km)
+  
+  # 数据加载
+  batch_size: 8
+  num_workers: 4
+  pin_memory: true
+
+# 模型配置
+model:
+  name: "PFTSR"
+  in_channels: 1        # 输入通道数 (单通道)
+  out_channels: 1       # 输出通道数 (单通道)
+  num_features: 64      # 特征维度
+  num_pft_blocks: 3     # PFT块数量
+  num_rb_per_block: 3   # 每个PFT块中的残差块数量
+  use_attention: true   # 是否使用注意力机制
+
+# 损失函数配置
+loss:
+  lambda_l1: 1.0        # L1损失权重
+  lambda_ssim: 0.5      # SSIM损失权重
+  lambda_freq: 0.1      # 频域损失权重
+  lambda_grad: 0.1      # 梯度损失权重
+
+# 优化器配置
+optimizer:
+  name: "Adam"
+  lr: 0.0001            # 初始学习率
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+
+# 学习率调度器
+scheduler:
+  name: "MultiStepLR"
+  milestones: [100, 200, 300]
+  gamma: 0.5
+
+# 训练配置
+training:
+  num_epochs: 500
+  warmup_epochs: 10
+  
+  # 梯度裁剪
+  grad_clip: 1.0
+  
+  # 验证频率
+  val_interval: 10      # 每10个epoch验证一次
+  
+  # 可视化频率
+  viz_interval: 50      # 每50个epoch可视化一次
+  
+  # 检查点保存
+  save_interval: 50     # 每50个epoch保存一次
+  keep_last_n: 5        # 保留最近N个检查点
+
+# 评估配置
+evaluation:
+  metrics:
+    - "psnr"
+    - "ssim"
+    - "rmse"
+  save_predictions: true
+
+# 输出配置
+output:
+  checkpoint_dir: "./checkpoints/ch08"
+  log_dir: "./logs/ch08"
+  viz_dir: "./visualizations/ch08"
+  
+# 设备配置
+device:
+  use_cuda: true
+  gpu_ids: [0]          # 使用的GPU ID列表
+  
+# 随机种子 (用于结果复现)
+seed: 42
