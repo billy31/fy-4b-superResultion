@@ -69,3 +69,7 @@ Thumbs.db
 .env
 preprocessing/output/
 *.npy
+preprocessing/output/
+*.npy
+tf-logs/
+*.tfevents*
